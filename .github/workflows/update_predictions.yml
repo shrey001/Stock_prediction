@@ -1,0 +1,42 @@
+name: Weekly Stock Prediction Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 14 * * 1'
+
+permissions:
+  contents: write
+
+jobs:
+  update-predictions:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Prediction Model
+        run: python prediction.py
+
+      - name: Commit Updated Files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add version6_current_ranking.csv
+          git add version6_diversified_portfolio.csv
+          git add version6_feature_importance.csv
+
+          git diff --cached --quiet || git commit -m "Weekly prediction refresh"
+          git push
