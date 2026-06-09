@@ -9,14 +9,7 @@ start_date = "2015-01-01"
 future_days = 126
 top_n = 10
 max_per_sector = 3
-
-tickers = [
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX",
-    "JPM","V","MA","COST","WMT","HD","PG","KO","PEP","MCD",
-    "XOM","CVX","COP","UNH","LLY","ABBV","JNJ","MRK","PFE","TMO",
-    "CRM","ORCL","ADBE","CSCO","INTC","QCOM","TXN","IBM","NOW","AMAT",
-    "CAT","BA","GE","HON","UPS","LMT","RTX","DE","MMM","LOW"
-]
+ticker_file = "tickers.csv"
 
 features = [
     "Return_5d", "Return_20d", "Return_60d", "Return_252d",
@@ -29,10 +22,33 @@ features = [
 ]
 
 
+def get_stock_universe():
+    print("Loading tickers from tickers.csv...")
+
+    df = pd.read_csv(ticker_file)
+
+    if "Ticker" not in df.columns:
+        raise ValueError("tickers.csv must have a column named Ticker")
+
+    tickers = df["Ticker"].dropna().astype(str).tolist()
+
+    tickers = [
+        t.replace(".", "-").strip().upper()
+        for t in tickers
+        if t.strip() != ""
+    ]
+
+    tickers = sorted(list(set(tickers)))
+
+    return tickers
+
+
 def get_series(data, column):
     result = data[column]
+
     if isinstance(result, pd.DataFrame):
         result = result.iloc[:, 0]
+
     return result
 
 
@@ -45,6 +61,7 @@ def add_rsi(df, period=14):
     avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss
+
     df["RSI"] = 100 - (100 / (1 + rs))
 
     return df
@@ -61,39 +78,70 @@ def add_macd(df):
     return df
 
 
-def get_fundamentals(tickers):
+def safe_get(source, ticker):
+    if not isinstance(source, dict):
+        return {}
+
+    value = source.get(ticker, {})
+
+    if not isinstance(value, dict):
+        return {}
+
+    return value
+
+
+def get_fundamentals(tickers, batch_size=50):
     print("\nDownloading fundamentals...")
-
-    tq = Ticker(tickers)
-
-    summary = tq.summary_detail
-    financial = tq.financial_data
-    profile = tq.asset_profile
 
     rows = []
 
-    for ticker in tickers:
-        s = summary.get(ticker, {}) if isinstance(summary, dict) else {}
-        f = financial.get(ticker, {}) if isinstance(financial, dict) else {}
-        p = profile.get(ticker, {}) if isinstance(profile, dict) else {}
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
 
-        rows.append({
-            "Ticker": ticker,
-            "Sector": p.get("sector", "Unknown"),
-            "Market_Cap": s.get("marketCap", np.nan),
-            "Forward_PE": s.get("forwardPE", np.nan),
-            "Trailing_PE": s.get("trailingPE", np.nan),
-            "Price_To_Book": s.get("priceToBook", np.nan),
-            "Profit_Margins": f.get("profitMargins", np.nan),
-            "Revenue_Growth": f.get("revenueGrowth", np.nan),
-            "Earnings_Growth": f.get("earningsGrowth", np.nan),
-            "Debt_To_Equity": f.get("debtToEquity", np.nan),
-            "ROE": f.get("returnOnEquity", np.nan),
-            "Free_Cashflow": f.get("freeCashflow", np.nan),
-        })
+        print(f"Fundamentals batch {i + 1} to {i + len(batch)}")
+
+        try:
+            tq = Ticker(batch)
+
+            summary = tq.summary_detail
+            financial = tq.financial_data
+            profile = tq.asset_profile
+
+        except Exception as e:
+            print(f"Could not download fundamentals batch: {e}")
+            summary = {}
+            financial = {}
+            profile = {}
+
+        for ticker in batch:
+            s = safe_get(summary, ticker)
+            f = safe_get(financial, ticker)
+            p = safe_get(profile, ticker)
+
+            rows.append({
+                "Ticker": ticker,
+                "Sector": p.get("sector", "Unknown"),
+                "Market_Cap": s.get("marketCap", np.nan),
+                "Forward_PE": s.get("forwardPE", np.nan),
+                "Trailing_PE": s.get("trailingPE", np.nan),
+                "Price_To_Book": s.get("priceToBook", np.nan),
+                "Profit_Margins": f.get("profitMargins", np.nan),
+                "Revenue_Growth": f.get("revenueGrowth", np.nan),
+                "Earnings_Growth": f.get("earningsGrowth", np.nan),
+                "Debt_To_Equity": f.get("debtToEquity", np.nan),
+                "ROE": f.get("returnOnEquity", np.nan),
+                "Free_Cashflow": f.get("freeCashflow", np.nan),
+            })
 
     return pd.DataFrame(rows)
 
+
+tickers = get_stock_universe()
+
+print(f"Total stocks in universe: {len(tickers)}")
+
+if len(tickers) == 0:
+    raise ValueError("No tickers found in tickers.csv")
 
 fundamentals = get_fundamentals(tickers)
 
@@ -111,9 +159,9 @@ spy_close = get_series(spy, "Close")
 all_data = []
 live_data = []
 
-for ticker in tickers:
+for index, ticker in enumerate(tickers, start=1):
     try:
-        print(f"Downloading {ticker}...")
+        print(f"Downloading {index}/{len(tickers)}: {ticker}...")
 
         stock = yf.download(
             ticker,
@@ -174,10 +222,8 @@ for ticker in tickers:
             - 1
         )
 
-        # Keep latest rows for live prediction
         live_data.append(df.copy())
 
-        # Training rows only where future is known
         train_df = df.dropna(subset=[
             "Future_Return",
             "Return_5d",
@@ -193,15 +239,19 @@ for ticker in tickers:
             "MACD_Diff"
         ]).copy()
 
-        all_data.append(train_df)
+        if not train_df.empty:
+            all_data.append(train_df)
 
     except Exception as e:
         print(f"Skipping {ticker}: {e}")
 
 
-# -----------------------------
-# TRAINING DATA
-# -----------------------------
+if len(all_data) == 0:
+    raise ValueError("No training data created.")
+
+if len(live_data) == 0:
+    raise ValueError("No live data created.")
+
 
 data = pd.concat(all_data).sort_index()
 
@@ -229,10 +279,6 @@ print("\nTarget distribution:")
 print(data["Top_20"].value_counts())
 
 
-# -----------------------------
-# LIVE DATA
-# -----------------------------
-
 live_data = pd.concat(live_data).sort_index()
 
 live_data["Date"] = live_data.index
@@ -248,10 +294,6 @@ live_data = live_data.set_index("Date")
 live_data = live_data.sort_index()
 
 
-# -----------------------------
-# CLEAN FEATURES
-# -----------------------------
-
 for col in features:
     data[col] = pd.to_numeric(data[col], errors="coerce")
     live_data[col] = pd.to_numeric(live_data[col], errors="coerce")
@@ -260,6 +302,9 @@ for col in features:
     live_data[col] = live_data[col].replace([np.inf, -np.inf], np.nan)
 
     median_value = data[col].median()
+
+    if pd.isna(median_value):
+        median_value = 0
 
     data[col] = data[col].fillna(median_value)
     live_data[col] = live_data[col].fillna(median_value)
@@ -271,10 +316,6 @@ y = data["Top_20"]
 if y.nunique() < 2:
     raise ValueError("Target only has one class. Need both 0 and 1.")
 
-
-# -----------------------------
-# TRAIN MODEL
-# -----------------------------
 
 model = XGBClassifier(
     n_estimators=500,
@@ -288,10 +329,6 @@ model = XGBClassifier(
 
 model.fit(X, y)
 
-
-# -----------------------------
-# CURRENT RANKING USING LATEST DATA
-# -----------------------------
 
 latest_rows = []
 
@@ -335,10 +372,6 @@ ranking = ranking.sort_values(
 )
 
 
-# -----------------------------
-# DIVERSIFIED PORTFOLIO
-# -----------------------------
-
 sector_counts = {}
 portfolio = []
 
@@ -357,10 +390,6 @@ for _, row in ranking.iterrows():
 portfolio_df = pd.DataFrame(portfolio)
 
 
-# -----------------------------
-# FEATURE IMPORTANCE
-# -----------------------------
-
 importance = pd.DataFrame({
     "Feature": features,
     "Importance": model.feature_importances_
@@ -370,11 +399,7 @@ importance = pd.DataFrame({
 )
 
 
-# -----------------------------
-# OUTPUT
-# -----------------------------
-
-print("\nVersion 6 Current Top 20 Ranking Using Latest Data:")
+print("\nCurrent Top 20 Ranking Using Latest Data:")
 
 for _, row in ranking.head(20).iterrows():
     print(
