@@ -1,10 +1,16 @@
-import time
+import sys
 import yfinance as yf
 import pandas as pd
 import numpy as np
 
 from yahooquery import Ticker
 from xgboost import XGBClassifier
+
+
+def log(message):
+    print(message, flush=True)
+    sys.stdout.flush()
+
 
 start_date = "2015-01-01"
 future_days = 126
@@ -24,12 +30,12 @@ features = [
 
 
 def get_stock_universe():
-    print("Loading tickers from tickers.csv...")
+    log("Loading tickers from Tickers.csv...")
 
     df = pd.read_csv(ticker_file)
 
     if "Ticker" not in df.columns:
-        raise ValueError("tickers.csv must have a column named Ticker")
+        raise ValueError("Tickers.csv must have a column named Ticker")
 
     tickers = df["Ticker"].dropna().astype(str).tolist()
 
@@ -41,36 +47,9 @@ def get_stock_universe():
 
     tickers = sorted(list(set(tickers)))
 
+    log(f"Loaded {len(tickers)} unique tickers.")
+
     return tickers
-
-
-def download_with_retry(ticker, start_date, max_retries=5):
-    for attempt in range(max_retries):
-        try:
-            print(f"Attempt {attempt + 1}/{max_retries} downloading {ticker}...")
-
-            data = yf.download(
-                ticker,
-                start=start_date,
-                auto_adjust=True,
-                progress=False,
-                threads=False
-            )
-
-            if not data.empty:
-                return data
-
-            print(f"{ticker} returned empty data.")
-
-        except Exception as e:
-            print(f"{ticker} download error: {e}")
-
-        sleep_time = 30 * (attempt + 1)
-        print(f"Waiting {sleep_time} seconds before retry...")
-        time.sleep(sleep_time)
-
-    print(f"Failed to download {ticker} after {max_retries} attempts.")
-    return pd.DataFrame()
 
 
 def get_series(data, column):
@@ -84,7 +63,6 @@ def get_series(data, column):
 
 def add_rsi(df, period=14):
     delta = df["Close"].diff()
-
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
 
@@ -122,14 +100,19 @@ def safe_get(source, ticker):
 
 
 def get_fundamentals(tickers, batch_size=50):
-    print("\nDownloading fundamentals...")
+    log("\nStarting fundamentals download...")
 
     rows = []
+    total_batches = (len(tickers) + batch_size - 1) // batch_size
 
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
+        batch_number = i // batch_size + 1
 
-        print(f"Fundamentals batch {i + 1} to {i + len(batch)}")
+        log(
+            f"[Fundamentals] Batch {batch_number}/{total_batches} | "
+            f"{i + 1}-{i + len(batch)} of {len(tickers)}"
+        )
 
         try:
             tq = Ticker(batch)
@@ -138,8 +121,10 @@ def get_fundamentals(tickers, batch_size=50):
             financial = tq.financial_data
             profile = tq.asset_profile
 
+            log(f"[Fundamentals] Batch {batch_number} completed.")
+
         except Exception as e:
-            print(f"Could not download fundamentals batch: {e}")
+            log(f"[Fundamentals] Batch {batch_number} failed: {e}")
             summary = {}
             financial = {}
             profile = {}
@@ -164,45 +149,61 @@ def get_fundamentals(tickers, batch_size=50):
                 "Free_Cashflow": f.get("freeCashflow", np.nan),
             })
 
-        time.sleep(2)
+    log("Fundamentals download finished.")
 
     return pd.DataFrame(rows)
 
 
+log("Starting prediction model...")
+
 tickers = get_stock_universe()
 
-print(f"Total stocks in universe: {len(tickers)}")
+log(f"Total stocks in universe: {len(tickers)}")
 
 if len(tickers) == 0:
-    raise ValueError("No tickers found in tickers.csv")
+    raise ValueError("No tickers found in Tickers.csv")
 
 fundamentals = get_fundamentals(tickers)
 
-print("Downloading SPY...")
+log("\nDownloading SPY benchmark data...")
 
-spy = download_with_retry("SPY", start_date, max_retries=6)
+spy = yf.download(
+    "SPY",
+    start=start_date,
+    auto_adjust=True,
+    progress=False,
+    timeout=30
+)
 
 if spy.empty:
-    raise ValueError("SPY download failed after retries. Cannot calculate relative strength.")
+    raise ValueError("SPY download failed. Cannot calculate relative strength.")
+
+log(f"SPY downloaded successfully with {len(spy)} rows.")
 
 spy_close = get_series(spy, "Close")
 
 all_data = []
 live_data = []
 
+log("\nDownloading stock price history...")
+
 for index, ticker in enumerate(tickers, start=1):
     try:
-        print(f"Downloading {index}/{len(tickers)}: {ticker}...")
+        log(f"[{index}/{len(tickers)}] Downloading {ticker}...")
 
-        stock = download_with_retry(
+        stock = yf.download(
             ticker,
-            start_date,
-            max_retries=3
+            start=start_date,
+            auto_adjust=True,
+            progress=False,
+            timeout=30
         )
 
         if stock.empty:
-            print(f"Skipping {ticker}")
+            log(f"[{index}/{len(tickers)}] Skipping {ticker}: no price data")
             continue
+
+        log(f"[{index}/{len(tickers)}] {ticker} downloaded: {len(stock)} rows")
 
         close = get_series(stock, "Close")
         volume = get_series(stock, "Volume")
@@ -271,12 +272,17 @@ for index, ticker in enumerate(tickers, start=1):
 
         if not train_df.empty:
             all_data.append(train_df)
-
-        time.sleep(1)
+            log(f"[{index}/{len(tickers)}] {ticker} added to training data.")
+        else:
+            log(f"[{index}/{len(tickers)}] {ticker} has no usable training rows.")
 
     except Exception as e:
-        print(f"Skipping {ticker}: {e}")
+        log(f"[{index}/{len(tickers)}] Skipping {ticker}: {e}")
 
+
+log("\nFinished downloading stock price history.")
+log(f"Training datasets created: {len(all_data)}")
+log(f"Live datasets created: {len(live_data)}")
 
 if len(all_data) == 0:
     raise ValueError("No training data created.")
@@ -284,6 +290,8 @@ if len(all_data) == 0:
 if len(live_data) == 0:
     raise ValueError("No live data created.")
 
+
+log("\nCombining training data...")
 
 data = pd.concat(all_data).sort_index()
 
@@ -307,9 +315,11 @@ data["Top_20"] = (
     data["Future_Return_Rank"] >= 0.80
 ).astype(int)
 
-print("\nTarget distribution:")
-print(data["Top_20"].value_counts())
+log("\nTarget distribution:")
+log(str(data["Top_20"].value_counts()))
 
+
+log("\nPreparing live prediction data...")
 
 live_data = pd.concat(live_data).sort_index()
 
@@ -325,6 +335,8 @@ live_data["Date"] = pd.to_datetime(live_data["Date"])
 live_data = live_data.set_index("Date")
 live_data = live_data.sort_index()
 
+
+log("\nCleaning feature columns...")
 
 for col in features:
     data[col] = pd.to_numeric(data[col], errors="coerce")
@@ -349,6 +361,8 @@ if y.nunique() < 2:
     raise ValueError("Target only has one class. Need both 0 and 1.")
 
 
+log("\nTraining XGBoost model...")
+
 model = XGBClassifier(
     n_estimators=500,
     learning_rate=0.03,
@@ -361,6 +375,10 @@ model = XGBClassifier(
 
 model.fit(X, y)
 
+log("Model training complete.")
+
+
+log("\nCreating live predictions...")
 
 latest_rows = []
 
@@ -391,7 +409,7 @@ for ticker in live_data["Ticker"].unique():
     })
 
 
-print(f"\nLive predictions created: {len(latest_rows)}")
+log(f"\nLive predictions created: {len(latest_rows)}")
 
 if len(latest_rows) == 0:
     raise ValueError("No live predictions were created.")
@@ -431,10 +449,10 @@ importance = pd.DataFrame({
 )
 
 
-print("\nCurrent Top 20 Ranking Using Latest Data:")
+log("\nCurrent Top 20 Ranking Using Latest Data:")
 
 for _, row in ranking.head(20).iterrows():
-    print(
+    log(
         f"{row['Ticker']}: "
         f"{row['Probability_Top_20']:.2%} "
         f"- {row['Sector']} "
@@ -442,25 +460,29 @@ for _, row in ranking.head(20).iterrows():
     )
 
 
-print("\nDiversified Top 10 Portfolio:")
+log("\nDiversified Top 10 Portfolio:")
 
 for _, row in portfolio_df.iterrows():
-    print(
+    log(
         f"{row['Ticker']}: "
         f"{row['Probability_Top_20']:.2%} "
         f"- {row['Sector']}"
     )
 
 
-print("\nFeature Importance:")
-print(importance)
+log("\nFeature Importance:")
+log(str(importance))
 
+
+log("\nSaving CSV outputs...")
 
 ranking.to_csv("version6_current_ranking.csv", index=False)
 portfolio_df.to_csv("version6_diversified_portfolio.csv", index=False)
 importance.to_csv("version6_feature_importance.csv", index=False)
 
-print("\nSaved files:")
-print("version6_current_ranking.csv")
-print("version6_diversified_portfolio.csv")
-print("version6_feature_importance.csv")
+log("\nSaved files:")
+log("version6_current_ranking.csv")
+log("version6_diversified_portfolio.csv")
+log("version6_feature_importance.csv")
+
+log("\nPrediction model completed successfully.")
