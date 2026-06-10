@@ -1,3 +1,4 @@
+import time
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -43,6 +44,35 @@ def get_stock_universe():
     return tickers
 
 
+def download_with_retry(ticker, start_date, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            print(f"Attempt {attempt + 1}/{max_retries} downloading {ticker}...")
+
+            data = yf.download(
+                ticker,
+                start=start_date,
+                auto_adjust=True,
+                progress=False,
+                threads=False
+            )
+
+            if not data.empty:
+                return data
+
+            print(f"{ticker} returned empty data.")
+
+        except Exception as e:
+            print(f"{ticker} download error: {e}")
+
+        sleep_time = 30 * (attempt + 1)
+        print(f"Waiting {sleep_time} seconds before retry...")
+        time.sleep(sleep_time)
+
+    print(f"Failed to download {ticker} after {max_retries} attempts.")
+    return pd.DataFrame()
+
+
 def get_series(data, column):
     result = data[column]
 
@@ -54,6 +84,7 @@ def get_series(data, column):
 
 def add_rsi(df, period=14):
     delta = df["Close"].diff()
+
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
 
@@ -133,6 +164,8 @@ def get_fundamentals(tickers, batch_size=50):
                 "Free_Cashflow": f.get("freeCashflow", np.nan),
             })
 
+        time.sleep(2)
+
     return pd.DataFrame(rows)
 
 
@@ -147,12 +180,10 @@ fundamentals = get_fundamentals(tickers)
 
 print("Downloading SPY...")
 
-spy = yf.download(
-    "SPY",
-    start=start_date,
-    auto_adjust=True,
-    progress=False
-)
+spy = download_with_retry("SPY", start_date, max_retries=6)
+
+if spy.empty:
+    raise ValueError("SPY download failed after retries. Cannot calculate relative strength.")
 
 spy_close = get_series(spy, "Close")
 
@@ -163,11 +194,10 @@ for index, ticker in enumerate(tickers, start=1):
     try:
         print(f"Downloading {index}/{len(tickers)}: {ticker}...")
 
-        stock = yf.download(
+        stock = download_with_retry(
             ticker,
-            start=start_date,
-            auto_adjust=True,
-            progress=False
+            start_date,
+            max_retries=3
         )
 
         if stock.empty:
@@ -241,6 +271,8 @@ for index, ticker in enumerate(tickers, start=1):
 
         if not train_df.empty:
             all_data.append(train_df)
+
+        time.sleep(1)
 
     except Exception as e:
         print(f"Skipping {ticker}: {e}")
