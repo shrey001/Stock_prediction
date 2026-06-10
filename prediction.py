@@ -10,7 +10,7 @@ start_date = "2015-01-01"
 future_days = 126
 top_n = 10
 max_per_sector = 3
-ticker_file = "tickers.csv"
+ticker_file = "Tickers.csv"
 
 features = [
     "Return_5d", "Return_20d", "Return_60d", "Return_252d",
